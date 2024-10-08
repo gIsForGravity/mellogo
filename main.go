@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/bwmarrin/discordgo"
+	"github.com/gisforgravity/mellogo/db"
 )
 
 type Score struct {
@@ -20,12 +21,14 @@ type Score struct {
 }
 
 func (s *Score) String() string {
-	return fmt.Sprintf("%d:%d", s.Minutes, s.Seconds)
+	return fmt.Sprintf("%d:%02d", s.Minutes, s.Seconds)
 }
 
 var (
 	Token string // Discord bot token
 	AppId string // Discord app id
+
+	Db db.Database // Database for scores and users
 
 	SubmitCommand = discordgo.ApplicationCommand{
 		Name:        "submit",
@@ -86,9 +89,18 @@ func init() {
 	flag.StringVar(&Token, "token", "", "Discord bot token")
 	flag.StringVar(&AppId, "id", "", "Discord application id")
 	flag.Parse()
+
+	// Create database object
+	Db = db.CreateSqlite("scores.sqlite")
 }
 
 func main() {
+	// Initialize mello database (if not already initialized)
+	err := Db.Initialize()
+	if err != nil {
+		log.Panicln("failed to initialize db:", err)
+	}
+
 	// Create a bot session using the token provided in flag
 	s, err := discordgo.New("Bot " + Token)
 	if err != nil {
@@ -216,11 +228,12 @@ func submitHandler(s *discordgo.Session, i *discordgo.InteractionCreate) {
 	})
 	if err != nil {
 		fmt.Println("error sending interaction response:", err)
+		return
 	}
 	// variables
 	subOption := i.ApplicationCommandData().Options[0]
 	options := subOption.Options
-	userId := i.Member.User.ID
+	member := i.Member
 
 	var scoreArg int
 	var date time.Time
@@ -262,7 +275,13 @@ func submitHandler(s *discordgo.Session, i *discordgo.InteractionCreate) {
 		sendUserError(s, i, true, true, "I couldn't understand the time you submitted. Please make sure it's a real amount of time and it looks like Minutes:Seconds.")
 		return
 	}
-	submitDate(s, date, userId, *score)
+	err = submitScore(s, date, member, *score)
+	if err != nil {
+		// Log the error and inform the user of the issue
+		fmt.Println("error submitting score:", err)
+		sendUserError(s, i, true, true, "There was an issue submitting yoru score. Please try again later.")
+		return
+	}
 	// Tell user their time was submitted
 	_, err = s.InteractionResponseEdit(i.Interaction, &discordgo.WebhookEdit{
 		Embeds: &[]*discordgo.MessageEmbed{
@@ -277,9 +296,24 @@ func submitHandler(s *discordgo.Session, i *discordgo.InteractionCreate) {
 	}
 }
 
-func submitDate(_ *discordgo.Session, d time.Time, userId string, score Score) {
-	// TODO: implement date submission
-	fmt.Printf("Score submitted for %s: %s - %s\n", userId, d.Format("01/02/2006"), score.String())
+func submitScore(_ *discordgo.Session, d time.Time, member *discordgo.Member, score Score) error {
+	id := member.User.ID
+	nickname := member.Nick
+	if nickname == "" {
+		nickname = member.User.Username
+	}
+	// log that we are submitting a score
+	fmt.Printf("Submitting score for %s: %s - %s\n", nickname, d.Format("01/02/2006"), score.String())
+
+	// Open db connection to submit score
+	conn, err := Db.Open()
+	if err != nil {
+		fmt.Println("error opening db connection:", err)
+	}
+	defer conn.Close()
+
+	// Submit the score
+	return conn.SubmitScore(id, nickname, score.Minutes, score.Seconds, d) // TODO: replace with username
 }
 
 func parseScore(score string) (*Score, error) {
@@ -311,13 +345,49 @@ func parseScore(score string) (*Score, error) {
 
 func leaderboardHandler(s *discordgo.Session, i *discordgo.InteractionCreate) {
 	// acknowledge command is received and tell discord we will respond later
-	// s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
-	// 	Type: discordgo.InteractionResponseDeferredChannelMessageWithSource,
-	// })
-	s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
-		Type: discordgo.InteractionResponseChannelMessageWithSource,
-		Data: &discordgo.InteractionResponseData{
-			Content: "yea oops haven't implemented this yet lol", // TODO
+	err := s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+		Type: discordgo.InteractionResponseDeferredChannelMessageWithSource,
+	})
+	if err != nil {
+		fmt.Println("error sending defer response:", err)
+		return
+	}
+
+	// open database connection
+	conn, err := Db.Open()
+	if err != nil {
+		fmt.Println("error opening database connection:", err)
+	}
+	defer conn.Close()
+
+	// request top 10 scores
+	top, err := conn.QueryTopScores(10)
+	if err != nil {
+		sendUserError(s, i, true, false, "There was an issue processing the command! Sorry ):")
+		fmt.Println("error querying db for top scores:", err)
+		return
+	}
+
+	// loop through all and craft message
+	var msg strings.Builder
+	msg.WriteString("Here are the top 10 scores of all time: ```\n") // notice backticks to make code block
+	for i, sr := range top {
+		s := Score{Minutes: sr.Minutes, Seconds: sr.Seconds}
+		//                         i+1   time  username date
+		msg.WriteString(fmt.Sprintf("%d) %s by %s on %s\n", i+1, s.String(), sr.User, sr.Date.Format("1/2/2006")))
+	}
+	// finish message and send to user
+	msg.WriteString("```") // close code block lol
+	// Send the leaderboard
+	_, err = s.InteractionResponseEdit(i.Interaction, &discordgo.WebhookEdit{
+		Embeds: &[]*discordgo.MessageEmbed{
+			{
+				Title:       "Leaderboard",
+				Description: msg.String(),
+			},
 		},
 	})
+	if err != nil {
+		fmt.Println("error sending interaction response:", err)
+	}
 }

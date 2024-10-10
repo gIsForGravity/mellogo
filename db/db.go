@@ -109,7 +109,7 @@ func (conn Connection) SetNickname(userid string, nickname string) error {
 	ON CONFLICT
 		(userid)
 	DO UPDATE SET
-		nickname = excluded.nickname`)
+		nickname = excluded.nickname`, userid, nickname)
 
 	return err
 }
@@ -155,7 +155,7 @@ func (conn Connection) QueryTopScores(count int) ([]ScoreResult, error) {
 		r.Date = time.Date(year, time.Month(month), day, 0, 0, 0, 0, time.Local)
 		// add result to list
 		scores = append(scores, r)
-		fmt.Printf("QueryTopScores: last scanned score: %+v", r)
+		// fmt.Printf("QueryTopScores: last scanned score: %+v\n", r)
 	}
 
 	return scores, nil

@@ -78,6 +78,20 @@ var (
 		Description: "shows the current leaderboard",
 		Type:        discordgo.ChatApplicationCommand,
 	}
+	ChangeNameCommand = discordgo.ApplicationCommand{
+		Name:        "change-name",
+		Description: "changes your name in the leaderboard",
+		Type:        discordgo.ChatApplicationCommand,
+		Options: []*discordgo.ApplicationCommandOption{
+			{
+				Name:        "name",
+				Description: "the name to change to",
+				Type:        discordgo.ApplicationCommandOptionString,
+				MaxLength:   18,
+				Required:    true,
+			},
+		},
+	}
 )
 
 func create(a int) *int {
@@ -108,9 +122,6 @@ func main() {
 		return
 	}
 
-	// dictionary of command names to ids
-	commandId := make(map[string]string)
-
 	// Register handlers
 	s.AddHandler(func(s *discordgo.Session, i *discordgo.InteractionCreate) {
 		// name, ok := commandId[i.AppID]
@@ -126,6 +137,8 @@ func main() {
 			submitHandler(s, i)
 		case "leaderboard":
 			leaderboardHandler(s, i)
+		case "change-name":
+			changeNameHandler(s, i)
 		default:
 			// handle default case
 			response := discordgo.InteractionResponse{
@@ -155,8 +168,9 @@ func main() {
 	defer s.Close()
 
 	// Register commands
-	registerCommand(s, &commandId, "submit", &SubmitCommand)
-	registerCommand(s, &commandId, "leaderboard", &LeaderboardCommand)
+	registerCommand(s, &SubmitCommand)
+	registerCommand(s, &LeaderboardCommand)
+	registerCommand(s, &ChangeNameCommand)
 
 	// Block
 	stop := make(chan os.Signal, 1)
@@ -165,14 +179,11 @@ func main() {
 	<-stop
 }
 
-func registerCommand(s *discordgo.Session, commandId *map[string]string, name string, command *discordgo.ApplicationCommand) {
-	result, err := s.ApplicationCommandCreate(AppId, "", command)
+func registerCommand(s *discordgo.Session, command *discordgo.ApplicationCommand) {
+	_, err := s.ApplicationCommandCreate(AppId, "", command)
 	if err != nil {
 		log.Panicln("command registration error: ", err)
 	}
-
-	// store resulting Id
-	(*commandId)[result.ID] = name
 }
 
 func sendUserError(s *discordgo.Session, i *discordgo.InteractionCreate, update bool, ephemeral bool, msg string) {
@@ -390,4 +401,47 @@ func leaderboardHandler(s *discordgo.Session, i *discordgo.InteractionCreate) {
 	if err != nil {
 		fmt.Println("error sending interaction response:", err)
 	}
+}
+
+func changeNameHandler(s *discordgo.Session, i *discordgo.InteractionCreate) {
+	// Process args
+	options := i.ApplicationCommandData().Options
+	if len(options) != 1 {
+		sendUserError(s, i, false, true, "There was an issue with your command [):]. Please try again.")
+		fmt.Println("changeNameHandler: options has ", len(options), "args")
+		return
+	}
+	nOpt := options[0]
+	if nOpt.Name != "name" {
+		sendUserError(s, i, false, true, "There was an issue with your command [):]. Please try again.")
+		fmt.Println("changeNameHandler: nOpt has name ", nOpt.Name)
+		return
+	}
+	name := nOpt.StringValue()
+
+	// Connect to database
+	conn, err := Db.Open()
+	if err != nil {
+		sendUserError(s, i, false, true, "There was an error trying to change your name. Sorry.")
+		fmt.Println("error opening db connection:", err)
+		return
+	}
+	defer conn.Close()
+
+	// send new name to database
+	err = conn.SetNickname(i.Member.User.ID, name)
+	if err != nil {
+		sendUserError(s, i, false, true, "There was an error trying to change your name. Sorry.")
+		fmt.Println("error while setting nickname:", err)
+		return
+	}
+
+	// tell user that the name change was successful
+	err = s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+		Type: discordgo.InteractionResponseChannelMessageWithSource,
+		Data: &discordgo.InteractionResponseData{
+			Content: fmt.Sprintf("Successfully changed your name to `%s`!", name),
+			Flags:   discordgo.MessageFlagsEphemeral,
+		},
+	})
 }
